@@ -1,6 +1,12 @@
+# Optional hints — the agent discovers everything from repo docs by default.
+# The 'validate' section is an optional outer safety net.
 repo: mathforge
-language: python
 
+hints:
+  language: python
+  test_command: "python -m pytest tests/ -v"
+
+# Optional: outer validation safety net (runs after the agent finishes each iteration)
 validate:
   functional:
     - name: matrix-tests
