@@ -24,12 +24,17 @@ def main():
 @main.command()
 @click.option("--objective", "-o", required=True, type=click.Path(exists=True), help="Path to objective.md")
 @click.option("--repo", "-r", required=True, type=click.Path(exists=True), help="Path to the target repo")
-@click.option("--config", "-c", type=click.Path(exists=True), help="Path to repo.yaml config")
+@click.option("--config", "-c", type=click.Path(exists=True), help="Path to repo.yaml config (optional)")
 @click.option("--max-iterations", "-n", default=50, help="Max iterations before stopping")
 @click.option("--model", "-m", default="claude-sonnet-4-20250514", help="Claude model to use")
 @click.option("--agent-id", default="forge-1", help="Agent identifier")
 def run(objective, repo, config, max_iterations, model, agent_id):
-    """Run the forge loop against a repo."""
+    """Run the forge loop against a repo.
+
+    The agent discovers how to build and test the repo by reading its
+    documentation (README.md, CLAUDE.md, Makefile, etc.). Optionally,
+    provide a repo.yaml with validation commands as an outer safety net.
+    """
     repo_path = Path(repo).resolve()
     objective_text = Path(objective).read_text()
 
@@ -39,13 +44,13 @@ def run(objective, repo, config, max_iterations, model, agent_id):
         border_style="blue",
     ))
 
-    # Load validation config
+    # Load validation config (optional — agent discovers build/test from repo docs)
     validate_configs = _load_validate_configs(config, repo_path)
 
-    if not validate_configs:
-        console.print("[bold red]No validation configs found.[/bold red]")
-        console.print("Provide a --config repo.yaml or place .tvastr/repo.yaml in the repo.")
-        sys.exit(1)
+    if validate_configs:
+        console.print(f"[dim]Loaded {len(validate_configs)} validation config(s) as outer safety net.[/dim]")
+    else:
+        console.print("[dim]No validation configs — agent will discover build/test from repo docs.[/dim]")
 
     # Init state DB
     db_path = repo_path / ".tvastr" / "tvastr.db"
@@ -101,7 +106,7 @@ def journal(repo, agent_id, limit):
 @main.command()
 @click.option("--repo", "-r", required=True, type=click.Path(exists=True))
 def init(repo):
-    """Initialize tvastr config for a repo."""
+    """Initialize tvastr config for a repo (optional — agents can discover everything from docs)."""
     repo_path = Path(repo).resolve()
     tvastr_dir = repo_path / ".tvastr"
     tvastr_dir.mkdir(exist_ok=True)
@@ -113,20 +118,18 @@ def init(repo):
 
     default_config = {
         "repo": str(repo_path),
-        "validate": {
-            "functional": [
-                {"name": "tests", "command": "pytest", "timeout": 300}
-            ],
+        "hints": {
+            "test_command": "pytest",
         },
     }
     config_path.write_text(yaml.dump(default_config, default_flow_style=False))
     console.print(f"[green]Created {config_path}[/green]")
-    console.print("Edit this file to configure build, deploy, and validation commands.")
+    console.print("This config is optional — the agent discovers build/test from repo docs.")
+    console.print("Add 'validate' section if you want an outer safety net for test commands.")
 
 
 def _load_validate_configs(config_path: str | None, repo_path: Path) -> list[ValidationConfig]:
-    """Load validation configs from repo.yaml."""
-    # Try explicit path, then .tvastr/repo.yaml
+    """Load validation configs from repo.yaml (optional)."""
     paths_to_try = []
     if config_path:
         paths_to_try.append(Path(config_path))

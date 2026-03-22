@@ -29,15 +29,7 @@ CREATE TABLE IF NOT EXISTS iterations (
     hypothesis            TEXT,
     files_changed         TEXT,
     patch_sha             TEXT,
-    build_status          TEXT,
-    build_log             TEXT,
-    build_duration_secs   REAL,
-    deploy_status         TEXT,
-    deploy_log            TEXT,
-    deploy_duration_secs  REAL,
-    validate_functional   TEXT,
-    validate_regression   TEXT,
-    validate_performance  TEXT,
+    validate_results      TEXT,
     outcome               TEXT NOT NULL,
     lesson                TEXT,
     created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -69,15 +61,7 @@ class Iteration:
     hypothesis: str = ""
     files_changed: list[str] = field(default_factory=list)
     patch_sha: str = ""
-    build_status: str = ""
-    build_log: str = ""
-    build_duration_secs: float = 0.0
-    deploy_status: str = ""
-    deploy_log: str = ""
-    deploy_duration_secs: float = 0.0
-    validate_functional: Optional[dict] = None
-    validate_regression: Optional[dict] = None
-    validate_performance: Optional[dict] = None
+    validate_results: Optional[list[dict]] = None
     outcome: str = ""
     lesson: str = ""
     id: Optional[int] = None
@@ -134,21 +118,14 @@ class StateDB:
             cur = conn.execute(
                 """INSERT INTO iterations
                    (agent_id, sub_objective_id, iteration_num, hypothesis,
-                    files_changed, patch_sha,
-                    build_status, build_log, build_duration_secs,
-                    deploy_status, deploy_log, deploy_duration_secs,
-                    validate_functional, validate_regression, validate_performance,
+                    files_changed, patch_sha, validate_results,
                     outcome, lesson)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     it.agent_id, it.sub_objective_id, it.iteration_num,
                     it.hypothesis,
                     json.dumps(it.files_changed), it.patch_sha,
-                    it.build_status, it.build_log, it.build_duration_secs,
-                    it.deploy_status, it.deploy_log, it.deploy_duration_secs,
-                    json.dumps(it.validate_functional),
-                    json.dumps(it.validate_regression),
-                    json.dumps(it.validate_performance),
+                    json.dumps(it.validate_results),
                     it.outcome, it.lesson,
                 ),
             )

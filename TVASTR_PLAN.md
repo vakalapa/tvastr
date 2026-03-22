@@ -6,6 +6,19 @@ Autonomous craftsman that forges, deploys, and validates code changes against li
 
 ---
 
+## Core Philosophy: Orchestrate, Don't Build
+
+Tvastr is a **pure orchestrator**. It does not embed knowledge about how to build, test, or deploy any specific project. Instead, it spawns intelligent agents that **discover** how the target repo works by reading its own documentation:
+
+- `README.md`, `CONTRIBUTING.md`, `CLAUDE.md` — project setup, build commands, test instructions
+- `Makefile`, `Dockerfile`, `docker-compose.yml`, `package.json`, `pyproject.toml` — build tooling
+- `.github/workflows/`, `.gitlab-ci.yml` — CI pipelines as a source of truth
+- Existing test scripts, linting configs, `.tvastr/objective.md`
+
+**Why no built-in builder/deployer?** Every repo is different. A Go monorepo builds differently from a Python library, which builds differently from a Rust microservice. Encoding build/deploy logic in tvastr creates brittle abstractions that inevitably lag behind real-world repos. The LLM agent can read a README and figure it out — just like a human engineer joining a new team.
+
+---
+
 ## Architecture Overview
 
 ```
@@ -27,8 +40,10 @@ Autonomous craftsman that forges, deploys, and validates code changes against li
        │            │            │
 ┌──────▼───┐  ┌────▼─────┐  ┌──▼──────────┐
 │ Agent 1  │  │ Agent 2  │  │  Agent N    │
-│ Sidecar  │  │ Kubelet  │  │  Perf       │
-│ lifecycle│  │ hooks    │  │  tuning     │
+│          │  │          │  │             │
+│ Discovers│  │ Discovers│  │ Discovers   │
+│ repo docs│  │ repo docs│  │ repo docs   │
+│ & builds │  │ & tests  │  │ & deploys   │
 └──────┬───┘  └────┬─────┘  └──┬──────────┘
        │            │            │
 ┌──────▼────────────▼────────────▼────────────────────────┐
@@ -39,16 +54,43 @@ Autonomous craftsman that forges, deploys, and validates code changes against li
 └──────────────┬──────────────────────────────────────────┘
                │
 ┌──────────────▼──────────────────────────────────────────┐
-│              INFRASTRUCTURE LAYER                         │
-│  Build → Deploy → Validate (shared cluster)              │
-└─────────────────────────────────────────────────────────┘
-               │
-┌──────────────▼──────────────────────────────────────────┐
 │              WEB UI (React + WebSocket)                   │
 │  • Live agent streams   • Iteration timeline             │
 │  • Test results grid    • Patch diff viewer              │
 └─────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## How Agents Discover a Repo
+
+When an agent starts working on a repo, its **first action** is a discovery phase:
+
+1. **Read repo documentation** — README.md, CONTRIBUTING.md, CLAUDE.md, any docs/ directory
+2. **Inspect build tooling** — Makefile, Dockerfile, package.json, pyproject.toml, Cargo.toml, go.mod, etc.
+3. **Inspect CI configuration** — .github/workflows/*.yml, .gitlab-ci.yml, Jenkinsfile
+4. **Understand test conventions** — where tests live, how to run them, what frameworks are used
+5. **Check for existing tvastr hints** — .tvastr/repo.yaml (optional, lightweight hints only)
+
+The agent then uses `run_command` to build, test, and deploy — using whatever commands the repo's own docs specify. No abstractions. No adapters. Just an intelligent agent reading docs and running commands, exactly like a human would.
+
+### .tvastr/repo.yaml (optional, minimal)
+
+The repo config is now **optional** and **minimal** — just hints to save the agent time, not a required schema:
+
+```yaml
+# Optional hints for the agent. The agent can discover all of this
+# from the repo's own docs, but hints speed up the first iteration.
+hints:
+  language: python
+  test_command: "python -m pytest tests/ -v"
+  build_command: "pip install -e ."
+  docs:
+    - README.md
+    - CONTRIBUTING.md
+```
+
+If no repo.yaml exists, the agent reads the repo's own documentation and figures it out. This is the expected default path.
 
 ---
 
@@ -87,75 +129,22 @@ Implement proper lifecycle management for native sidecar containers in kubernete
 - No changes to the API server or etcd schema in this iteration
 ```
 
-### .tvastr/repo.yaml
-
-```yaml
-repo: github.com/kubernetes/kubernetes
-language: go
-
-build:
-  command: make quick-release-images
-  artifact: registry.local:5000/kube-node:tvastr-{{agent}}-{{iter}}
-  components:
-    - cmd/kubelet
-    - cmd/kube-apiserver
-    - cmd/kube-controller-manager
-
-deploy:
-  type: kubernetes
-  cluster: kubeconfig://~/.kube/tvastr-cluster
-  strategy: kind-reload    # rebuild kind node image
-  kind:
-    config: .tvastr/kind-config.yaml
-    node_image: "{{artifact}}"
-  health_check:
-    command: kubectl get nodes -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}'
-    expect: "True"
-    timeout: 5m
-
-validate:
-  functional:
-    - name: sidecar-lifecycle
-      command: go test ./test/e2e/common/... -run TestSidecarLifecycle -count=1
-      timeout: 15m
-    - name: sidecar-readiness
-      command: go test ./test/e2e/common/... -run TestSidecarReadiness -count=1
-      timeout: 10m
-  regression:
-    - name: node-e2e
-      command: make test-e2e-node FOCUS="Container|Sidecar|Lifecycle"
-      timeout: 30m
-    - name: unit-kubelet
-      command: go test ./pkg/kubelet/... -count=1 -timeout=20m
-      timeout: 25m
-  performance:
-    - name: pod-startup-latency
-      command: ./test/e2e/benchmarks/pod_startup.sh
-      threshold: "p99_startup_ms <= 1.02 * baseline"
-    - name: density-100-pods
-      command: go test ./test/e2e/benchmarks/... -run TestDensity100 -count=1
-      threshold: "avg_latency_ms <= 1.02 * baseline"
-
-agents:
-  max_parallel: 3
-  merge_strategy: sequential
-  file_boundaries:
-    agent_1: ["pkg/kubelet/kuberuntime/kuberuntime_container_lifecycle.go", "pkg/kubelet/kuberuntime/kuberuntime_manager.go"]
-    agent_2: ["pkg/kubelet/status/", "staging/src/k8s.io/api/core/v1/types.go"]
-    agent_3: ["test/e2e/common/", "test/e2e/benchmarks/"]
-```
-
 ### What Tvastr Does With This
 
-**Forge Master** reads the objective, sees 3 sub-objectives, spawns 3 agents:
+**Forge Master** reads the objective, sees 3 sub-objectives, spawns 3 agents. Each agent:
 
-| Agent | Sub-objective | Files | Works on |
-|-------|--------------|-------|----------|
-| Agent 1 | Pre-stop hooks + shutdown ordering | kubelet runtime | Lifecycle logic |
-| Agent 2 | Independent readiness tracking | kubelet status + API types | Status reporting |
-| Agent 3 | Test coverage + perf validation | e2e tests + benchmarks | Verification |
+1. Reads kubernetes/kubernetes's README.md, CONTRIBUTING.md, and Makefile
+2. Discovers build commands (`make quick-release-images`), test commands (`go test`, `make test-e2e-node`)
+3. Understands the repo structure from docs and code exploration
+4. Works on its sub-objective using discovered build/test commands
 
-Agent 3 intentionally runs slightly behind — it writes tests against the interfaces agents 1 and 2 are building, validating their work.
+| Agent | Sub-objective | Works on | Discovers |
+|-------|--------------|----------|-----------|
+| Agent 1 | Pre-stop hooks + shutdown ordering | Lifecycle logic | `make`, `go test ./pkg/kubelet/...` |
+| Agent 2 | Independent readiness tracking | Status reporting | API types, kubelet status |
+| Agent 3 | Test coverage + perf validation | Verification | `make test-e2e-node`, benchmark scripts |
+
+No Docker adapter. No Kubernetes adapter. No builder abstraction. The agents read the repo and run the right commands.
 
 ---
 
@@ -173,6 +162,12 @@ Built on **Claude Agent SDK**. The brain of the operation.
 - Conflict resolution: if agent B's patch breaks agent A's passing tests, forge master mediates
 - Decide when the overall objective is met
 
+**What it does NOT do:**
+- Build code (agent's job)
+- Run tests (agent's job)
+- Deploy (agent's job)
+- Know anything about Docker, Kubernetes, or any specific toolchain
+
 **Why Claude Agent SDK:** Native tool-use, multi-turn conversations, session management. The forge master itself is an agent that spawns child agents — the SDK's architecture supports this cleanly.
 
 ### 2. Forge Agent (Worker)
@@ -180,31 +175,31 @@ Built on **Claude Agent SDK**. The brain of the operation.
 Each agent owns one sub-objective and runs the forge loop independently:
 
 ```
-PLAN → PATCH → BUILD → DEPLOY → VALIDATE
-  ↑                                    │
-  └────── revert + learn ◄────────────┘
+DISCOVER → PLAN → PATCH → VALIDATE → keep/revert → repeat
+  ↑                                         │
+  └───────── revert + learn ◄──────────────┘
 ```
 
 **Phase details:**
 
 | Phase | What happens | On failure |
 |-------|-------------|------------|
-| **PLAN** | Read objective + journal + cluster state + other agents' patches. Produce a patch plan. | — |
+| **DISCOVER** | Read repo docs (README, CLAUDE.md, Makefile, CI configs). Learn how to build, test, deploy. | Ask forge master for guidance |
+| **PLAN** | Read objective + journal + repo state + other agents' patches. Produce a patch plan. | — |
 | **PATCH** | Edit code on a git branch (`tvastr/agent-N/iter-M`). | — |
-| **BUILD** | Run repo's build command. Produce artifact. | Revert, log compile error, re-plan |
-| **DEPLOY** | Push artifact to cluster. Wait for healthy rollout. | Rollback, revert, log deploy error |
-| **VALIDATE** | Run 3 tiers: functional → regression → performance (fail-fast). | Revert, log which tests failed and why, re-plan |
+| **VALIDATE** | Run build + tests using commands discovered from repo docs. Fail-fast. | Revert, log which tests failed and why, re-plan |
 
-**Agent tools (exposed via MCP server):**
-- `file_read`, `file_write`, `file_search` — code manipulation
-- `git_*` — branch, commit, diff, log
-- `kubectl_read` — get, describe, logs (read-only, no mutations)
-- `build` — trigger build pipeline
-- `deploy` — trigger deploy pipeline
-- `run_test` — execute a specific validation tier
+The DISCOVER phase happens once at the start (and the agent caches what it learns). Subsequent iterations go straight to PLAN.
+
+**Agent tools:**
+- `read_file`, `write_file`, `edit_file` — code manipulation
+- `list_files`, `search_code` — code exploration
+- `run_command` — execute any shell command (build, test, deploy, git, etc.)
 - `journal_read` — query past iterations (own + other agents')
 - `journal_write` — log current iteration result
 - `claim_lock` / `release_lock` — coordinate shared resources
+
+Note: there is no `build` or `deploy` tool. The agent uses `run_command` with whatever commands it discovered from the repo's docs. This is intentional — tvastr doesn't need to know what "building" means for any specific repo.
 
 ### 3. SQLite State Store
 
@@ -234,15 +229,7 @@ CREATE TABLE iterations (
   hypothesis            TEXT,
   files_changed         TEXT,            -- JSON array
   patch_sha             TEXT,
-  build_status          TEXT,            -- pass | fail | skip
-  build_log             TEXT,
-  build_duration_secs   INTEGER,
-  deploy_status         TEXT,
-  deploy_log            TEXT,
-  deploy_duration_secs  INTEGER,
-  validate_functional   TEXT,            -- JSON: {status, details}
-  validate_regression   TEXT,
-  validate_performance  TEXT,
+  validate_results      TEXT,            -- JSON: [{name, status, output, duration}]
   outcome               TEXT NOT NULL,   -- advanced | reverted | partial
   lesson                TEXT,            -- structured failure reason
   created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -269,7 +256,7 @@ CREATE TABLE baselines (
 
 ### 4. Multi-Agent Coordination
 
-Three strategies, chosen per-repo in `.tvastr/repo.yaml`:
+Three strategies, chosen per-run:
 
 **Strategy A: Isolated branches, sequential merge (default)**
 - Each agent works on its own branch
@@ -278,7 +265,7 @@ Three strategies, chosen per-repo in `.tvastr/repo.yaml`:
 - Simple, safe, slower
 
 **Strategy B: Shared branch, file-level locking**
-- Agents claim files/directories before editing (via `file_boundaries` config)
+- Agents claim files/directories before editing
 - No two agents touch the same file simultaneously
 - Faster, requires good sub-objective decomposition
 
@@ -288,8 +275,8 @@ Three strategies, chosen per-repo in `.tvastr/repo.yaml`:
 - If combined build/test fails, bisect which agent's patch broke it
 - Fastest, most complex
 
-**Deploy coordination:**
-- Only one agent deploys at a time (resource lock on cluster)
+**Resource coordination:**
+- Only one agent deploys at a time (resource lock)
 - Agents queue for deploy access via SQLite locks
 - Lock has TTL to prevent deadlocks from crashed agents
 
@@ -328,7 +315,8 @@ Human writes objective.md
     ▼    ▼    ▼
   Agent1 Agent2 Agent3    ← parallel, own branches
     │    │    │
-    │    │    │  (each running PLAN→PATCH→BUILD→DEPLOY→VALIDATE independently)
+    │    │    │  each: DISCOVER repo docs → PLAN → PATCH → VALIDATE
+    │    │    │  (agents figure out build/test from repo's own docs)
     │    │    │
     ▼    ▼    ▼
   Pass?  Pass?  Pass?
@@ -353,12 +341,11 @@ Human writes objective.md
 |------|-------------|
 | **Max iterations** | Per-agent cap (default: 50) |
 | **Max wall time** | Total run cap (default: 8 hours) |
-| **Cluster health gate** | Check cluster health before every deploy. Don't deploy to a broken cluster. |
-| **Rollback-first** | Any deploy failure triggers rollback before revert |
+| **Rollback-first** | Any failure triggers revert before retrying |
 | **Human checkpoint** | Optionally pause after every N iterations for review |
 | **Cost tracking** | Log LLM tokens + compute cost per iteration. Abort if budget exceeded. |
-| **Blast radius control** | Agents can only modify files under paths specified in `file_boundaries` |
-| **No direct cluster mutation** | Agents get read-only kubectl. All changes go through build→deploy pipeline. |
+| **Blast radius control** | Agents can only modify files under the target repo |
+| **Command allowlist** | Optional: restrict what commands agents can run |
 
 ---
 
@@ -369,7 +356,7 @@ The agent doesn't blindly retry. Each planning phase uses:
 1. **Objective** from `objective.md`
 2. **Full failure history** from the journal (own + other agents')
 3. **Current repo state** (diff from upstream)
-4. **Cluster state** (pod status, logs, events)
+4. **Repo documentation** discovered in the DISCOVER phase
 5. **Strategy rules** encoded in the system prompt:
    - If the last 3 iterations failed on the same test → step back, reconsider approach
    - If regression tests fail → fix those before advancing the feature
@@ -395,18 +382,10 @@ tvastr/
 │   │   └── scheduler.py       # Agent spawn + coordination
 │   ├── agent/
 │   │   ├── forge_agent.py      # Forge Agent loop
-│   │   ├── planner.py          # Iteration planning
-│   │   ├── patcher.py          # Code editing
-│   │   └── tools.py            # MCP tool definitions
+│   │   ├── discovery.py        # Repo discovery (read docs, infer build/test)
+│   │   └── tools.py            # Tool definitions
 │   ├── infra/
-│   │   ├── builder.py          # Build abstraction
-│   │   ├── deployer.py         # Deploy abstraction
-│   │   ├── validator.py        # Test runner (3 tiers)
-│   │   ├── rollback.py         # Revert + cluster rollback
-│   │   └── adapters/
-│   │       ├── kubernetes.py
-│   │       ├── docker_compose.py
-│   │       └── local.py
+│   │   └── validator.py        # Generic command runner + result parser
 │   ├── state/
 │   │   ├── db.py               # SQLite schema + queries
 │   │   ├── journal.py          # Journal read/write helpers
@@ -440,7 +419,7 @@ tvastr/
 ├── examples/
 │   ├── k8s-sidecar-lifecycle/
 │   │   ├── objective.md
-│   │   └── repo.yaml
+│   │   └── repo.yaml           # optional hints
 │   ├── redis-cluster-fix/
 │   │   ├── objective.md
 │   │   └── repo.yaml
@@ -448,9 +427,10 @@ tvastr/
 │       ├── objective.md
 │       └── repo.yaml
 └── .tvastr/
-    ├── repo.yaml
     └── tvastr.db
 ```
+
+Note: no `infra/builder.py`, no `infra/deployer.py`, no `infra/adapters/`. The agent handles all of that by reading the repo's documentation and running commands directly.
 
 ---
 
@@ -458,12 +438,15 @@ tvastr/
 
 | Phase | What | Deliverable | Agent support |
 |-------|------|-------------|---------------|
-| **P1** | Single agent, local repo, no deploy | CLI + forge loop + SQLite journal. Test against a Python lib with pytest. | 1 agent |
-| **P2** | Docker build + local deploy | Builder + deployer (docker-compose adapter). Test against a containerized Go service. | 1 agent |
-| **P3** | Kubernetes deploy + 3-tier validation | K8s adapter, validation framework, rollback. Test against a kind cluster. | 1 agent |
-| **P4** | Multi-agent with forge master | Orchestrator, decomposer, merge strategies, locking. Test with 3 agents on k/k. | N agents |
-| **P5** | Web UI | FastAPI + WebSocket + React dashboard with live streaming and controls. | N agents |
-| **P6** | Battle test | End-to-end on kubernetes/kubernetes with the sidecar lifecycle objective. | N agents |
+| **P1** | Single agent, local repo | CLI + forge loop + SQLite journal + agent-driven discovery. Agent reads repo docs to learn how to build/test. | 1 agent |
+| **P2** | Multi-agent with forge master | Orchestrator, decomposer, merge strategies, locking. Test with N agents on a real repo. | N agents |
+| **P3** | Web UI | FastAPI + WebSocket + React dashboard with live streaming and controls. | N agents |
+| **P4** | Battle test | End-to-end on kubernetes/kubernetes with the sidecar lifecycle objective. Agent discovers k8s build/test/deploy from k8s docs. | N agents |
+
+**What changed from the original plan:**
+- **Removed P2 (Docker Build) and P3 (Kubernetes)** — no built-in builder/deployer abstractions. Agents discover how to build and deploy from the repo's own docs.
+- **4 phases instead of 6** — simpler, faster to ship.
+- **No Docker or Kubernetes dependency in tvastr itself** — tvastr is pure Python + SQLite. The target repo may use Docker/K8s, but that's the agent's problem to figure out.
 
 ---
 
@@ -471,5 +454,5 @@ tvastr/
 
 | Project | What we borrow | What we do differently |
 |---------|---------------|----------------------|
-| [karpathy/autoresearch](https://github.com/karpathy/autoresearch) | Iterative loop with automatic revert on regression. Fixed budget per iteration. Human steers via markdown. | Multi-signal validation (not single metric). Live infra deployment. Multi-agent. |
-| [AutoForgeAI/autoforge](https://github.com/AutoForgeAI/autoforge) | Claude Agent SDK + MCP tools. SQLite for state. WebSocket UI for streaming. | Not greenfield — patches existing repos. Deploys to real clusters. Revert-on-failure, not skip-and-retry. |
+| [karpathy/autoresearch](https://github.com/karpathy/autoresearch) | Iterative loop with automatic revert on regression. Fixed budget per iteration. Human steers via markdown. | Multi-signal validation (not single metric). Multi-agent. Agent-driven discovery. |
+| [AutoForgeAI/autoforge](https://github.com/AutoForgeAI/autoforge) | Claude Agent SDK + MCP tools. SQLite for state. WebSocket UI for streaming. | Not greenfield — patches existing repos. Revert-on-failure. No hardcoded build/deploy — agents discover from docs. |

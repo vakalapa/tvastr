@@ -1,6 +1,9 @@
 """Forge Agent — the core iteration loop.
 
-PLAN → PATCH → VALIDATE → keep/revert → repeat
+DISCOVER → PLAN → PATCH → VALIDATE → keep/revert → repeat
+
+The agent discovers how to build/test by reading the repo's own documentation.
+Tvastr only orchestrates the iteration loop and manages state.
 """
 
 import json
@@ -11,7 +14,6 @@ from pathlib import Path
 import anthropic
 from rich.console import Console
 from rich.panel import Panel
-from rich.syntax import Syntax
 
 from tvastr.agent.tools import TOOL_DEFINITIONS, execute_tool
 from tvastr.infra.validator import ValidationConfig, run_validation_suite
@@ -27,7 +29,7 @@ class ForgeAgent:
         repo_path: Path,
         objective: str,
         db: StateDB,
-        validate_configs: list[ValidationConfig],
+        validate_configs: list[ValidationConfig] | None = None,
         max_iterations: int = 50,
         model: str = "claude-sonnet-4-20250514",
     ):
@@ -35,7 +37,7 @@ class ForgeAgent:
         self.repo_path = repo_path.resolve()
         self.objective = objective
         self.db = db
-        self.validate_configs = validate_configs
+        self.validate_configs = validate_configs or []
         self.max_iterations = max_iterations
         self.model = model
         self.client = anthropic.Anthropic()
@@ -50,7 +52,8 @@ class ForgeAgent:
         console.print(Panel(
             f"[bold]Tvastr Forge Agent[/bold] — {self.agent_id}\n"
             f"Repo: {self.repo_path}\n"
-            f"Max iterations: {self.max_iterations}",
+            f"Max iterations: {self.max_iterations}\n"
+            f"Validation: {'repo.yaml configs' if self.validate_configs else 'agent-driven (discovers from repo docs)'}",
             title="Starting Forge",
             border_style="blue",
         ))
@@ -87,8 +90,8 @@ class ForgeAgent:
         journal_context = self._build_journal_context()
         user_message = self._build_iteration_prompt(iteration_num, journal_context)
 
-        # Run the agent (plan + patch phase)
-        console.print("[dim]Agent is planning and patching...[/dim]")
+        # Run the agent (discover + plan + patch + self-validate phase)
+        console.print("[dim]Agent is working (discover → plan → patch → validate)...[/dim]")
         hypothesis, files_changed = self._run_agent_turn(user_message)
 
         if not files_changed:
@@ -109,37 +112,38 @@ class ForgeAgent:
         # Commit the patch
         patch_sha = self._git_commit(iteration_num, hypothesis)
 
-        # Validate
-        console.print("[dim]Running validation...[/dim]")
-        val_start = time.time()
-        results = run_validation_suite(self.validate_configs, self.repo_path, fail_fast=True)
-        val_duration = time.time() - val_start
+        # Outer validation — if configs are provided, run them as a safety net.
+        # If no configs, trust the agent's self-validation via run_command.
+        validate_results = []
+        all_passed = True
 
-        all_passed = all(r.status == "pass" for r in results)
+        if self.validate_configs:
+            console.print("[dim]Running outer validation (from repo.yaml)...[/dim]")
+            val_start = time.time()
+            results = run_validation_suite(self.validate_configs, self.repo_path, fail_fast=True)
+            val_duration = time.time() - val_start
 
-        # Build validation dicts
-        functional_result = None
-        regression_result = None
-        for r in results:
-            d = r.to_dict()
-            if "regression" in r.name.lower() or "existing" in r.name.lower():
-                regression_result = d
+            all_passed = all(r.status == "pass" for r in results)
+            validate_results = [r.to_dict() for r in results]
+
+            if all_passed:
+                console.print(f"[bold green]All validations passed![/bold green] ({val_duration:.1f}s)")
             else:
-                functional_result = d
+                failed_names = [r.name for r in results if r.status != "pass"]
+                console.print(f"[bold red]Validation failed:[/bold red] {', '.join(failed_names)}")
+        else:
+            console.print("[dim]No outer validation configs — trusting agent's self-validation.[/dim]")
 
         if all_passed:
-            console.print(f"[bold green]All validations passed![/bold green] ({val_duration:.1f}s)")
             lesson = "Changes validated successfully."
             outcome = "advanced"
         else:
-            failed_names = [r.name for r in results if r.status != "pass"]
             failed_output = "\n".join(
-                f"--- {r.name} ---\n{r.output[:2000]}" for r in results if r.status != "pass"
+                f"--- {r['name']} ---\n{r['output'][:2000]}"
+                for r in validate_results if r["status"] != "pass"
             )
-            console.print(f"[bold red]Validation failed:[/bold red] {', '.join(failed_names)}")
-            lesson = f"Failed validations: {', '.join(failed_names)}.\n{failed_output}"
+            lesson = f"Failed validations: {', '.join(r['name'] for r in validate_results if r['status'] != 'pass')}.\n{failed_output}"
             outcome = "reverted"
-            # Revert
             self._git_revert(snapshot_sha)
             console.print("[dim]Changes reverted.[/dim]")
 
@@ -151,15 +155,13 @@ class ForgeAgent:
             hypothesis=hypothesis,
             files_changed=files_changed,
             patch_sha=patch_sha,
-            build_status="pass",  # In P1, if code runs it "built"
-            validate_functional=functional_result,
-            validate_regression=regression_result,
+            validate_results=validate_results if validate_results else None,
             outcome=outcome,
             lesson=lesson,
         ))
 
-        # Check if objective is fully met (all validations pass including any objective-specific ones)
-        if all_passed and self._check_objective_met(results):
+        # Check if objective is fully met
+        if all_passed:
             return "objective_met"
 
         return outcome
@@ -220,6 +222,18 @@ class ForgeAgent:
         return hypothesis, sorted(files_changed)
 
     def _build_iteration_prompt(self, iteration_num: int, journal_context: str) -> str:
+        discovery_note = ""
+        if iteration_num == 1 or not journal_context:
+            discovery_note = """
+## Discovery (IMPORTANT — first iteration)
+Before making any changes, discover how this repo works:
+1. Read README.md, CONTRIBUTING.md, CLAUDE.md (if they exist)
+2. Check build tooling: Makefile, package.json, pyproject.toml, Cargo.toml, go.mod
+3. Check CI configs: .github/workflows/*.yml, .gitlab-ci.yml
+4. Understand test commands and conventions
+5. Use this knowledge to build, test, and validate your changes.
+"""
+
         return f"""## Objective
 {self.objective}
 
@@ -228,14 +242,15 @@ This is iteration {iteration_num} of {self.max_iterations}.
 
 ## Journal (past iterations)
 {journal_context if journal_context else "No past iterations yet. This is your first attempt."}
-
+{discovery_note}
 ## Instructions
 1. Read the relevant code to understand the current state
 2. Plan your change — form a clear hypothesis
 3. Implement the change using the tools available
-4. When done, explain what you changed and why
+4. Run the repo's build/test commands to validate your changes (use run_command)
+5. When done, explain what you changed and why
 
-Remember: after you finish, the system will run validation tests. If they fail, your changes will be reverted and you'll see the failure details in the next iteration."""
+Remember: if outer validation tests exist, they will also run after you finish. If they fail, your changes will be reverted and you'll see the failure details in the next iteration."""
 
     def _build_journal_context(self) -> str:
         iterations = self.db.get_iterations(self.agent_id, limit=10)
@@ -255,18 +270,16 @@ Remember: after you finish, the system will run validation tests. If they fail, 
         return "\n".join(lines)
 
     def _check_objective_met(self, results: list) -> bool:
-        """Check if all validations passed. In P1, passing all tests = objective met."""
+        """Check if all validations passed."""
         return all(r.status == "pass" for r in results)
 
     def _git_snapshot(self) -> str:
-        """Create a snapshot of current state. Returns commit SHA or stash ref."""
-        # Ensure we're in a git repo
+        """Create a snapshot of current state. Returns commit SHA."""
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             capture_output=True, text=True, cwd=self.repo_path,
         )
         if result.returncode != 0:
-            # Init git if needed
             subprocess.run(["git", "init"], cwd=self.repo_path, capture_output=True)
             subprocess.run(["git", "add", "-A"], cwd=self.repo_path, capture_output=True)
             subprocess.run(
