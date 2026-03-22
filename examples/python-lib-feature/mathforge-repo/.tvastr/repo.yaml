@@ -1,0 +1,12 @@
+repo: mathforge
+language: python
+
+validate:
+  functional:
+    - name: matrix-tests
+      command: python -m pytest tests/test_matrix.py -v
+      timeout: 60
+  regression:
+    - name: existing-vector-tests
+      command: python -m pytest tests/test_vector.py -v
+      timeout: 60

@@ -1,0 +1,160 @@
+"""Tvastr CLI — entry point for forge runs."""
+
+import sys
+from pathlib import Path
+
+import click
+import yaml
+from rich.console import Console
+from rich.panel import Panel
+
+from tvastr.agent.forge_agent import ForgeAgent
+from tvastr.infra.validator import ValidationConfig
+from tvastr.state.db import StateDB
+
+console = Console()
+
+
+@click.group()
+def main():
+    """Tvastr — autonomous craftsman that forges code changes."""
+    pass
+
+
+@main.command()
+@click.option("--objective", "-o", required=True, type=click.Path(exists=True), help="Path to objective.md")
+@click.option("--repo", "-r", required=True, type=click.Path(exists=True), help="Path to the target repo")
+@click.option("--config", "-c", type=click.Path(exists=True), help="Path to repo.yaml config")
+@click.option("--max-iterations", "-n", default=50, help="Max iterations before stopping")
+@click.option("--model", "-m", default="claude-sonnet-4-20250514", help="Claude model to use")
+@click.option("--agent-id", default="forge-1", help="Agent identifier")
+def run(objective, repo, config, max_iterations, model, agent_id):
+    """Run the forge loop against a repo."""
+    repo_path = Path(repo).resolve()
+    objective_text = Path(objective).read_text()
+
+    console.print(Panel(
+        f"[bold]Objective:[/bold]\n{objective_text[:500]}",
+        title="Tvastr",
+        border_style="blue",
+    ))
+
+    # Load validation config
+    validate_configs = _load_validate_configs(config, repo_path)
+
+    if not validate_configs:
+        console.print("[bold red]No validation configs found.[/bold red]")
+        console.print("Provide a --config repo.yaml or place .tvastr/repo.yaml in the repo.")
+        sys.exit(1)
+
+    # Init state DB
+    db_path = repo_path / ".tvastr" / "tvastr.db"
+    db = StateDB(db_path)
+
+    # Create and run agent
+    agent = ForgeAgent(
+        agent_id=agent_id,
+        repo_path=repo_path,
+        objective=objective_text,
+        db=db,
+        validate_configs=validate_configs,
+        max_iterations=max_iterations,
+        model=model,
+    )
+
+    success = agent.run()
+    sys.exit(0 if success else 1)
+
+
+@main.command()
+@click.option("--repo", "-r", required=True, type=click.Path(exists=True), help="Path to the target repo")
+@click.option("--agent-id", default=None, help="Filter by agent ID")
+@click.option("--limit", "-n", default=20, help="Number of iterations to show")
+def journal(repo, agent_id, limit):
+    """View the forge journal for a repo."""
+    repo_path = Path(repo).resolve()
+    db_path = repo_path / ".tvastr" / "tvastr.db"
+
+    if not db_path.exists():
+        console.print("[yellow]No forge journal found for this repo.[/yellow]")
+        sys.exit(0)
+
+    db = StateDB(db_path)
+    iterations = db.get_iterations(agent_id=agent_id, limit=limit)
+
+    if not iterations:
+        console.print("[yellow]No iterations recorded yet.[/yellow]")
+        return
+
+    for it in reversed(iterations):
+        color = "green" if it["outcome"] == "advanced" else "red"
+        console.print(Panel(
+            f"[bold]Hypothesis:[/bold] {it['hypothesis'][:300]}\n"
+            f"[bold]Files:[/bold] {it['files_changed']}\n"
+            f"[bold]Outcome:[/bold] [{color}]{it['outcome']}[/{color}]\n"
+            f"[bold]Lesson:[/bold] {it['lesson'][:500]}",
+            title=f"Iteration {it['iteration_num']} — {it['agent_id']}",
+            border_style=color,
+        ))
+
+
+@main.command()
+@click.option("--repo", "-r", required=True, type=click.Path(exists=True))
+def init(repo):
+    """Initialize tvastr config for a repo."""
+    repo_path = Path(repo).resolve()
+    tvastr_dir = repo_path / ".tvastr"
+    tvastr_dir.mkdir(exist_ok=True)
+
+    config_path = tvastr_dir / "repo.yaml"
+    if config_path.exists():
+        console.print(f"[yellow]Config already exists: {config_path}[/yellow]")
+        return
+
+    default_config = {
+        "repo": str(repo_path),
+        "validate": {
+            "functional": [
+                {"name": "tests", "command": "pytest", "timeout": 300}
+            ],
+        },
+    }
+    config_path.write_text(yaml.dump(default_config, default_flow_style=False))
+    console.print(f"[green]Created {config_path}[/green]")
+    console.print("Edit this file to configure build, deploy, and validation commands.")
+
+
+def _load_validate_configs(config_path: str | None, repo_path: Path) -> list[ValidationConfig]:
+    """Load validation configs from repo.yaml."""
+    # Try explicit path, then .tvastr/repo.yaml
+    paths_to_try = []
+    if config_path:
+        paths_to_try.append(Path(config_path))
+    paths_to_try.append(repo_path / ".tvastr" / "repo.yaml")
+
+    for p in paths_to_try:
+        if p.exists():
+            raw = yaml.safe_load(p.read_text())
+            return _parse_validate_configs(raw)
+
+    return []
+
+
+def _parse_validate_configs(raw: dict) -> list[ValidationConfig]:
+    """Parse validation configs from raw YAML dict."""
+    configs = []
+    validate = raw.get("validate", {})
+
+    for tier in ("functional", "regression", "performance"):
+        for item in validate.get(tier, []):
+            configs.append(ValidationConfig(
+                name=item["name"],
+                command=item["command"],
+                timeout=item.get("timeout", 300),
+            ))
+
+    return configs
+
+
+if __name__ == "__main__":
+    main()
