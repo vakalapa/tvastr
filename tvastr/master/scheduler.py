@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import subprocess
 from dataclasses import dataclass, field
 from enum import Enum
@@ -86,6 +85,52 @@ class Scheduler:
         self._git("checkout", self._base_branch)
         return branch
 
+    @staticmethod
+    def _topological_sort(sub_objectives: list[dict]) -> list[dict]:
+        """Sort sub-objectives in dependency order using Kahn's algorithm.
+
+        Args:
+            sub_objectives: List of dicts with 'id' and 'depends_on' keys,
+                where depends_on is a list of IDs.
+
+        Returns:
+            Sub-objectives reordered so dependencies come first.
+
+        Raises:
+            ValueError: If there is a cycle in the dependency graph.
+        """
+        id_to_obj = {obj["id"]: obj for obj in sub_objectives}
+        valid_ids = set(id_to_obj.keys())
+
+        # Build adjacency list and in-degree count
+        in_degree: dict[int, int] = {obj["id"]: 0 for obj in sub_objectives}
+        dependents: dict[int, list[int]] = {obj["id"]: [] for obj in sub_objectives}
+
+        for obj in sub_objectives:
+            for dep_id in obj.get("depends_on", []):
+                if dep_id in valid_ids:
+                    in_degree[obj["id"]] += 1
+                    dependents[dep_id].append(obj["id"])
+
+        # Start with nodes that have no dependencies
+        queue = [oid for oid, deg in in_degree.items() if deg == 0]
+        result: list[dict] = []
+
+        while queue:
+            node = queue.pop(0)
+            result.append(id_to_obj[node])
+            for dependent in dependents[node]:
+                in_degree[dependent] -= 1
+                if in_degree[dependent] == 0:
+                    queue.append(dependent)
+
+        if len(result) != len(sub_objectives):
+            raise ValueError(
+                "Dependency cycle detected among sub-objectives"
+            )
+
+        return result
+
     def schedule(
         self,
         sub_objectives: list[dict],
@@ -102,6 +147,8 @@ class Scheduler:
         """
         self._base_branch = self._current_branch()
         self.slots = []
+
+        sub_objectives = self._topological_sort(sub_objectives)
 
         for i, sub_obj in enumerate(sub_objectives):
             agent_id = f"agent-{i}"

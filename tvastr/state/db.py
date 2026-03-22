@@ -99,8 +99,16 @@ class StateDB:
 
     def get_sub_objectives(self) -> list[dict]:
         with self._conn() as conn:
-            rows = conn.execute("SELECT * FROM sub_objectives ORDER BY priority DESC").fetchall()
-            return [dict(r) for r in rows]
+            rows = conn.execute("SELECT * FROM sub_objectives ORDER BY priority ASC").fetchall()
+            result = []
+            for r in rows:
+                d = dict(r)
+                if d.get('depends_on'):
+                    d['depends_on'] = json.loads(d['depends_on'])
+                else:
+                    d['depends_on'] = []
+                result.append(d)
+            return result
 
     def update_sub_objective_status(self, obj_id: int, status: str, assigned_agent: str | None = None):
         with self._conn() as conn:

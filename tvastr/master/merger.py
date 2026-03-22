@@ -69,6 +69,10 @@ class Merger:
         # Ensure we're on the base branch
         self._git("checkout", self.base_branch)
 
+        # Save current HEAD SHA for rollback
+        head_result = self._git("rev-parse", "HEAD")
+        self._pre_merge_sha = head_result.stdout.strip()
+
         for branch in branches:
             console.print(f"[dim]Merging {branch}...[/dim]")
             result = self._merge_one(branch)
@@ -141,8 +145,12 @@ class Merger:
             return []
         return result.stdout.strip().split("\n")
 
-    def combined_validation(self) -> bool:
-        """Run full validation suite on the current merged state."""
+    def combined_validation(self, rollback_sha: str | None = None) -> bool:
+        """Run full validation suite on the current merged state.
+
+        Args:
+            rollback_sha: If provided and validation fails, revert to this SHA.
+        """
         if not self.validate_configs:
             console.print("[dim]No validation configs — skipping combined validation.[/dim]")
             return True
@@ -156,5 +164,8 @@ class Merger:
         else:
             failed = [r.name for r in results if r.status != "pass"]
             console.print(f"[bold red]Combined validation failed: {', '.join(failed)}[/bold red]")
+            if rollback_sha:
+                console.print(f"[yellow]Rolling back to {rollback_sha}[/yellow]")
+                self._git("reset", "--hard", rollback_sha)
 
         return passed
