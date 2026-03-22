@@ -28,12 +28,17 @@ def main():
 @click.option("--max-iterations", "-n", default=50, help="Max iterations before stopping")
 @click.option("--model", "-m", default="claude-sonnet-4-20250514", help="Claude model to use")
 @click.option("--agent-id", default="forge-1", help="Agent identifier")
-def run(objective, repo, config, max_iterations, model, agent_id):
+@click.option("--multi-agent", is_flag=True, default=False, help="Use multi-agent mode with Forge Master")
+@click.option("--max-agents", default=3, help="Max concurrent agents (multi-agent mode)")
+@click.option("--parallel", is_flag=True, default=False, help="Run agents in parallel (multi-agent mode)")
+def run(objective, repo, config, max_iterations, model, agent_id, multi_agent, max_agents, parallel):
     """Run the forge loop against a repo.
 
     The agent discovers how to build and test the repo by reading its
     documentation (README.md, CLAUDE.md, Makefile, etc.). Optionally,
     provide a repo.yaml with validation commands as an outer safety net.
+
+    Use --multi-agent to decompose the objective and run multiple agents.
     """
     repo_path = Path(repo).resolve()
     objective_text = Path(objective).read_text()
@@ -56,18 +61,34 @@ def run(objective, repo, config, max_iterations, model, agent_id):
     db_path = repo_path / ".tvastr" / "tvastr.db"
     db = StateDB(db_path)
 
-    # Create and run agent
-    agent = ForgeAgent(
-        agent_id=agent_id,
-        repo_path=repo_path,
-        objective=objective_text,
-        db=db,
-        validate_configs=validate_configs,
-        max_iterations=max_iterations,
-        model=model,
-    )
+    if multi_agent:
+        # Multi-agent mode: Forge Master decomposes and coordinates
+        from tvastr.master.orchestrator import ForgeMaster
 
-    success = agent.run()
+        master = ForgeMaster(
+            repo_path=repo_path,
+            objective=objective_text,
+            db=db,
+            validate_configs=validate_configs,
+            max_iterations_per_agent=max_iterations,
+            max_concurrent_agents=max_agents,
+            model=model,
+            parallel=parallel,
+        )
+        success = master.run()
+    else:
+        # Single-agent mode
+        agent = ForgeAgent(
+            agent_id=agent_id,
+            repo_path=repo_path,
+            objective=objective_text,
+            db=db,
+            validate_configs=validate_configs,
+            max_iterations=max_iterations,
+            model=model,
+        )
+        success = agent.run()
+
     sys.exit(0 if success else 1)
 
 

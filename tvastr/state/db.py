@@ -102,11 +102,13 @@ class StateDB:
             rows = conn.execute("SELECT * FROM sub_objectives ORDER BY priority DESC").fetchall()
             return [dict(r) for r in rows]
 
-    def update_sub_objective_status(self, obj_id: int, status: str):
+    def update_sub_objective_status(self, obj_id: int, status: str, assigned_agent: str | None = None):
         with self._conn() as conn:
             updates = {"status": status}
             if status == "done":
                 updates["completed_at"] = datetime.now().isoformat()
+            if assigned_agent is not None:
+                updates["assigned_agent"] = assigned_agent
             set_clause = ", ".join(f"{k} = ?" for k in updates)
             conn.execute(
                 f"UPDATE sub_objectives SET {set_clause} WHERE id = ?",
