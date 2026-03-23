@@ -147,7 +147,7 @@ class ForgeMaster:
 
         # Step 7: Combined validation
         if merged_count > 0:
-            overall_pass = merger.combined_validation()
+            overall_pass = merger.combined_validation(rollback_sha=merger._pre_merge_sha)
         else:
             overall_pass = False
 

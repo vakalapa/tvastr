@@ -43,6 +43,41 @@ Respond with ONLY a JSON array. Each element:
 """
 
 
+def validate_dependencies(sub_objectives: list[SubObjective]) -> None:
+    """Check for dependency cycles among sub-objectives.
+
+    Uses depth-first search to detect cycles. Each sub-objective's index
+    in the list is its ID, and depends_on contains indices of dependencies.
+
+    Args:
+        sub_objectives: List of SubObjective instances to validate.
+
+    Raises:
+        ValueError: If a dependency cycle is detected.
+    """
+    n = len(sub_objectives)
+    # 0 = unvisited, 1 = in current path, 2 = fully visited
+    state = [0] * n
+
+    def dfs(node: int) -> bool:
+        if state[node] == 1:
+            return True  # cycle found
+        if state[node] == 2:
+            return False
+        state[node] = 1
+        for dep in sub_objectives[node].depends_on:
+            if 0 <= dep < n and dfs(dep):
+                return True
+        state[node] = 2
+        return False
+
+    for i in range(n):
+        if state[i] == 0 and dfs(i):
+            raise ValueError(
+                "Dependency cycle detected among sub-objectives"
+            )
+
+
 async def decompose_objective(
     objective_text: str,
     repo_context: str | None = None,
@@ -77,7 +112,7 @@ async def decompose_objective(
         raise ValueError(f"Failed to parse decomposition response: {text[:500]}")
 
     raw = json.loads(json_match.group())
-    return [
+    result = [
         SubObjective(
             description=item["description"],
             acceptance_criteria=item.get("acceptance_criteria", []),
@@ -87,6 +122,8 @@ async def decompose_objective(
         )
         for item in raw
     ]
+    validate_dependencies(result)
+    return result
 
 
 def decompose_from_checklist(objective_text: str) -> list[SubObjective] | None:
@@ -115,7 +152,7 @@ def decompose_from_checklist(objective_text: str) -> list[SubObjective] | None:
     if not items:
         return None
 
-    return [
+    result = [
         SubObjective(
             description=item,
             acceptance_criteria=[],
@@ -125,3 +162,5 @@ def decompose_from_checklist(objective_text: str) -> list[SubObjective] | None:
         )
         for i, item in enumerate(items)
     ]
+    validate_dependencies(result)
+    return result
