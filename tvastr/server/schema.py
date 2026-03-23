@@ -108,12 +108,14 @@ class IterationOut(BaseModel):
 
 class AgentOut(BaseModel):
     agent_id: str
-    sub_objective_id: int
-    sub_objective_desc: str
-    branch_name: str
+    sub_objective_id: Optional[int] = None
+    sub_objective_desc: str = ""
+    branch_name: str = ""
     state: AgentState = AgentState.pending
     current_iteration: int = 0
     total_iterations: int = 0
+    iteration_count: int = 0
+    latest_outcome: str = ""
     error: Optional[str] = None
 
 
@@ -143,10 +145,28 @@ class RunOut(BaseModel):
 class RunSummary(BaseModel):
     """Lightweight run info for list endpoints."""
     run_id: str
-    repo_path: str
-    state: RunState
+    repo_path: str = ""
+    objective: str = ""
+    state: RunState = RunState.pending
     agent_count: int = 0
     created_at: str = ""
+    completed_at: Optional[str] = None
+
+
+# ── Utility Response Models ─────────────────────────────────────────
+
+class MessageOut(BaseModel):
+    """Generic message response."""
+    message: str
+
+
+class ErrorOut(BaseModel):
+    """Error response."""
+    detail: str
+
+
+# Alias for backward compatibility
+RunCreate = RunCreateRequest
 
 
 # ── WebSocket Messages ─────────────────────────────────────────────
