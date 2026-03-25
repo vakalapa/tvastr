@@ -5,6 +5,7 @@ DISCOVER → PLAN → PATCH → VALIDATE → keep/revert → repeat
 The agent discovers how to build/test by reading the repo's own documentation.
 Tvastr only orchestrates the iteration loop and manages state.
 """
+from __future__ import annotations
 
 import json
 import subprocess

@@ -2,7 +2,7 @@
 name = "tvastr"
 version = "0.1.0"
 description = "Autonomous craftsman that forges, deploys, and validates code changes against live infrastructure"
-requires-python = ">=3.11"
+requires-python = ">=3.8"
 dependencies = [
     "anthropic>=0.52.0",
     "click>=8.1.0",

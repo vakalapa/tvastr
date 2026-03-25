@@ -1,4 +1,5 @@
 """Tool definitions for the forge agent. These are exposed to Claude via tool_use."""
+from __future__ import annotations
 
 import os
 import subprocess
@@ -83,21 +84,20 @@ TOOL_DEFINITIONS = [
 def execute_tool(tool_name: str, tool_input: dict, repo_path: Path) -> str:
     """Execute a tool and return the result as a string."""
     try:
-        match tool_name:
-            case "read_file":
-                return _read_file(repo_path, tool_input["path"])
-            case "write_file":
-                return _write_file(repo_path, tool_input["path"], tool_input["content"])
-            case "edit_file":
-                return _edit_file(repo_path, tool_input["path"], tool_input["old_string"], tool_input["new_string"])
-            case "list_files":
-                return _list_files(repo_path, tool_input.get("path", "."), tool_input.get("pattern", "*"))
-            case "search_code":
-                return _search_code(repo_path, tool_input["pattern"], tool_input.get("path", "."), tool_input.get("file_glob"))
-            case "run_command":
-                return _run_command(repo_path, tool_input["command"], tool_input.get("timeout", 120))
-            case _:
-                return f"Error: Unknown tool '{tool_name}'"
+        if tool_name == "read_file":
+            return _read_file(repo_path, tool_input["path"])
+        elif tool_name == "write_file":
+            return _write_file(repo_path, tool_input["path"], tool_input["content"])
+        elif tool_name == "edit_file":
+            return _edit_file(repo_path, tool_input["path"], tool_input["old_string"], tool_input["new_string"])
+        elif tool_name == "list_files":
+            return _list_files(repo_path, tool_input.get("path", "."), tool_input.get("pattern", "*"))
+        elif tool_name == "search_code":
+            return _search_code(repo_path, tool_input["pattern"], tool_input.get("path", "."), tool_input.get("file_glob"))
+        elif tool_name == "run_command":
+            return _run_command(repo_path, tool_input["command"], tool_input.get("timeout", 120))
+        else:
+            return f"Error: Unknown tool '{tool_name}'"
     except Exception as e:
         return f"Error: {type(e).__name__}: {e}"
 

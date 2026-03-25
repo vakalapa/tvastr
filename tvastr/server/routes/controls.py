@@ -1,4 +1,5 @@
 """Run control endpoints — pause, resume, kill agent."""
+from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 
